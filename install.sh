@@ -245,7 +245,17 @@ db.close();
 # ============================================================
 echo -e "${GREEN}[4/7] Creating services...${NC}"
 
+NODE_BIN=$(which node)
+
 for svc in cwmp nbi fs ui; do
+    BIN_PATH="$INSTALL_DIR/genieacs/dist/bin/genieacs-${svc}"
+    if [ -f "$BIN_PATH" ]; then
+        chmod +x "$BIN_PATH"
+        echo -e "  Binary OK: genieacs-${svc}"
+    else
+        echo -e "  ${RED}WARNING: $BIN_PATH not found${NC}"
+    fi
+    
     cat > "/etc/systemd/system/genieacs-${svc}.service" << EOF2
 [Unit]
 Description=GenieACS ${svc^^}
@@ -255,7 +265,7 @@ Type=simple
 WorkingDirectory=$INSTALL_DIR/genieacs/dist
 Environment=GENIEACS_MONGODB_CONNECTION_URL=mongodb://127.0.0.1/genieacs
 $( [ "$svc" = "ui" ] && echo "Environment=GENIEACS_UI_JWT_SECRET=${JWT_SECRET}" )
-ExecStart=/usr/bin/node $INSTALL_DIR/genieacs/dist/bin/genieacs-${svc}
+ExecStart=${NODE_BIN} ${BIN_PATH}
 Restart=always
 RestartSec=5
 [Install]
@@ -270,7 +280,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$INSTALL_DIR/genieacs-panel/backend
-ExecStart=/usr/bin/node $INSTALL_DIR/genieacs-panel/backend/src/server.js
+ExecStart=${NODE_BIN} $INSTALL_DIR/genieacs-panel/backend/src/server.js
 Restart=always
 RestartSec=5
 [Install]
@@ -284,7 +294,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$INSTALL_DIR/genieacs-panel/frontend
-ExecStart=/usr/bin/npm run dev
+ExecStart=$(which npm) run dev
 Restart=always
 RestartSec=5
 [Install]
