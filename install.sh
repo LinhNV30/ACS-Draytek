@@ -64,9 +64,22 @@ echo -e "  MongoDB: $(mongod --version 2>/dev/null | head -1)"
 # ============================================================
 echo -e "${GREEN}[2/7] Building GenieACS...${NC}"
 
+# Remove corrupted clone if exists
+if [ -d "$INSTALL_DIR/genieacs" ] && [ ! -f "$INSTALL_DIR/genieacs/package.json" ]; then
+    echo -e "${YELLOW}  Removing corrupted clone...${NC}"
+    rm -rf "$INSTALL_DIR/genieacs"
+fi
+
 if [ ! -d "$INSTALL_DIR/genieacs" ]; then
+    echo -e "${YELLOW}  Cloning GenieACS...${NC}"
     git clone "$GENIEACS_REPO" "$INSTALL_DIR/genieacs" 2>&1 | tail -1
 fi
+
+if [ ! -f "$INSTALL_DIR/genieacs/package.json" ]; then
+    echo -e "${RED}FATAL: Failed to clone GenieACS${NC}"
+    exit 1
+fi
+
 cd "$INSTALL_DIR/genieacs"
 
 echo -e "${YELLOW}  Patching for Node.js $(node -v)...${NC}"
@@ -184,6 +197,11 @@ for f in icons-*.svg; do cp "$f" icons.svg 2>/dev/null; done
 # STEP 3: Panel
 # ============================================================
 echo -e "${GREEN}[3/7] Installing Panel...${NC}"
+
+if [ -d "$INSTALL_DIR/genieacs-panel" ] && [ ! -f "$INSTALL_DIR/genieacs-panel/README.md" ]; then
+    rm -rf "$INSTALL_DIR/genieacs-panel"
+fi
+
 if [ ! -d "$INSTALL_DIR/genieacs-panel" ]; then
     git clone "$PANEL_REPO" "$INSTALL_DIR/genieacs-panel" 2>&1 | tail -1
 fi
