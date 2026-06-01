@@ -1,138 +1,69 @@
-import mysql from 'mysql2/promise';
+import Database from 'better-sqlite3';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const dbConfig = {
-  host: process.env.DB_HOST,
-  port: Number(process.env.DB_PORT) || 3306,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  charset: 'utf8mb4',
-  // Pool options (valid for mysql2)
-  waitForConnections: true,
-  connectionLimit: Number(process.env.DB_POOL_MAX) || 10,
-  queueLimit: 0,
-  // Connection options (valid for mysql2)
-  connectTimeout: Number(process.env.DB_CONNECT_TIMEOUT_MS) || 60000,
-  enableKeepAlive: true,
-  keepAliveInitialDelay: 0,
-  multipleStatements: false
-};
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-let pool;
+const dbPath = process.env.SQLITE_PATH || path.join(__dirname, '..', '..', '..', 'database.sqlite');
 
-function getPool() {
-  if (!pool) {
-    pool = mysql.createPool(dbConfig);
-    
-    pool.on('connection', (connection) => {
-      console.log('New database connection established');
-    });
-    
-    pool.on('error', (err) => {
-      console.error('Database pool error:', err);
-      if (err.code === 'PROTOCOL_CONNECTION_LOST') {
-        console.log('Attempting to reconnect to database...');
-      }
-    });
+let db;
+function getDb() {
+  if (!db) {
+    db = new Database(dbPath);
+    db.pragma('journal_mode = WAL');
+    db.pragma('foreign_keys = ON');
+    console.log(`SQLite connected: ${dbPath}`);
   }
-  return pool;
+  return db;
 }
 
-async function getConnection(retries = 5, delayMs = 3000) {
-  let lastError;
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      const connection = await getPool().getConnection();
-      return connection;
-    } catch (error) {
-      lastError = error;
-      const code = error && (error.code || error.errno) ? (error.code || error.errno) : error?.message;
-      if (attempt === retries) {
-        console.error('Error getting database connection:', error);
-        break;
-      }
-      console.warn(`DB connection attempt ${attempt} failed (${code}). Retrying in ${delayMs}ms...`);
-      await new Promise((r) => setTimeout(r, delayMs));
-    }
-  }
-  throw lastError;
-}
-
-async function executeQuery(query, params = []) {
-  let connection;
+async function query(sql, params = []) {
+  const database = getDb();
+  const isSelect = sql.trim().toUpperCase().startsWith('SELECT');
   try {
-    connection = await getConnection();
-    const [rows] = await connection.execute(query, params);
-    return rows;
-  } catch (error) {
-    console.error('Error executing query:', error);
-    throw error;
-  } finally {
-    if (connection) {
-      connection.release();
-    }
+    if (isSelect) return database.prepare(sql).all(...params);
+    else return database.prepare(sql).run(...params);
+  } catch (err) {
+    console.error('SQLite error:', err.message);
+    throw err;
   }
 }
+
+async function getConnection() {
+  const database = getDb();
+  return {
+    query: async (s, p) => query(s, p),
+    execute: async (s, p) => query(s, p),
+    release: () => {},
+    beginTransaction: () => { database.prepare('BEGIN').run(); },
+    commit: () => { database.prepare('COMMIT').run(); },
+    rollback: () => { database.prepare('ROLLBACK').run(); },
+  };
+}
+
+async function executeQuery(sql, params = []) { return query(sql, params); }
 
 async function executeTransaction(queries) {
-  let connection;
-  try {
-    connection = await getConnection();
-    await connection.beginTransaction();
-    
+  const database = getDb();
+  const t = database.transaction(() => {
     const results = [];
-    for (const { query, params = [] } of queries) {
-      const [rows] = await connection.execute(query, params);
-      results.push(rows);
+    for (const { query: q, params = [] } of queries) {
+      results.push(database.prepare(q).all(...params));
     }
-    
-    await connection.commit();
     return results;
-  } catch (error) {
-    if (connection) {
-      await connection.rollback();
-    }
-    console.error('Transaction error:', error);
-    throw error;
-  } finally {
-    if (connection) {
-      connection.release();
-    }
-  }
+  });
+  return t();
 }
 
 async function testConnection() {
-  let connection;
-  try {
-    connection = await getConnection();
-    await connection.ping();
-    console.log('Database connection successful');
-    return true;
-  } catch (error) {
-    console.error('Database connection failed:', error);
-    return false;
-  } finally {
-    if (connection) {
-      connection.release();
-    }
-  }
+  const database = getDb();
+  const result = database.prepare('SELECT 1 as ok').get();
+  console.log('Database connection OK:', result);
+  return true;
 }
 
-async function closePool() {
-  if (pool) {
-    await pool.end();
-    console.log('Database pool closed');
-  }
-}
-
-export {
-  getPool,
-  getConnection,
-  executeQuery,
-  executeTransaction,
-  testConnection,
-  closePool
-};
+export { getDb, getConnection, executeQuery, executeTransaction, testConnection, query };
