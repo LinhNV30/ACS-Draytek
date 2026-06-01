@@ -159,20 +159,70 @@ npm install 2>&1 | tail -3
 echo -e "${YELLOW}  npm build...${NC}"
 npm run build 2>&1 | tail -5
 
-if [ ! -d "dist/bin" ]; then
-    echo -e "${RED}  BUILD FAILED - dist/bin not found${NC}"
-    echo -e "${YELLOW}  Trying fallback build...${NC}"
-    rm -rf dist node_modules
-    npm install 2>&1 | tail -3
-    npm run build 2>&1 | tail -5
+# Check for binaries (may have .js extension if rename failed)
+MISSING_BINS=""
+for b in cwmp nbi fs ui; do
+    if [ ! -f "dist/bin/genieacs-${b}" ] && [ ! -f "dist/bin/genieacs-${b}.js" ]; then
+        MISSING_BINS="$MISSING_BINS $b"
+    fi
+done
+
+if [ -n "$MISSING_BINS" ]; then
+    echo -e "${RED}  Missing binaries:${MISSING_BINS}${NC}"
+    echo -e "${YELLOW}  Installing genieacs from npm instead...${NC}"
+    cd "$INSTALL_DIR"
+    rm -rf genieacs
+    mkdir -p genieacs/dist/bin genieacs/dist/config/ext genieacs/dist/public genieacs/dist/seed
+    npm install --prefix genieacs genieacs@latest 2>&1 | tail -3
+    
+    # npm installs genieacs to node_modules, copy binaries
+    if [ -f "genieacs/node_modules/.bin/genieacs-cwmp" ]; then
+        cp genieacs/node_modules/.bin/genieacs-* genieacs/dist/bin/ 2>/dev/null || true
+        # Also check lib/node_modules
+    elif [ -d "genieacs/node_modules/genieacs/bin" ]; then
+        cp genieacs/node_modules/genieacs/bin/* genieacs/dist/bin/ 2>/dev/null || true
+    fi
+    
+    # If still missing, download prebuilt from GitHub releases
+    if [ ! -f "genieacs/dist/bin/genieacs-cwmp" ]; then
+        echo -e "${YELLOW}  Downloading prebuilt genieacs...${NC}"
+        npm install -g genieacs 2>&1 | tail -2
+        NPM_GLOBAL=$(npm root -g)
+        if [ -d "$NPM_GLOBAL/genieacs/bin" ]; then
+            cp "$NPM_GLOBAL/genieacs/bin/"* genieacs/dist/bin/ 2>/dev/null || true
+        fi
+        # Copy from global bin
+        for b in cwmp nbi fs ui; do
+            if which genieacs-${b} 2>/dev/null; then
+                cp "$(which genieacs-${b})" "genieacs/dist/bin/genieacs-${b}" 2>/dev/null || true
+            fi
+        done
+    fi
+    cd "$INSTALL_DIR/genieacs"
 fi
 
-if [ ! -d "dist/bin" ]; then
-    echo -e "${RED}FATAL: GenieACS build failed${NC}"
+# Final check
+BINS_OK=true
+for b in cwmp nbi fs ui; do
+    if [ -f "dist/bin/genieacs-${b}" ]; then
+        echo -e "  Binary OK: genieacs-${b}"
+    elif [ -f "dist/bin/genieacs-${b}.js" ]; then
+        mv "dist/bin/genieacs-${b}.js" "dist/bin/genieacs-${b}"
+        chmod +x "dist/bin/genieacs-${b}"
+        echo -e "  Binary OK: genieacs-${b} (renamed .js)"
+    else
+        echo -e "  ${RED}MISSING: genieacs-${b}${NC}"
+        BINS_OK=false
+    fi
+done
+
+if [ "$BINS_OK" = false ]; then
+    echo -e "${RED}FATAL: Could not build or install GenieACS binaries${NC}"
+    echo -e "${YELLOW}Try manually: npm install -g genieacs${NC}"
     exit 1
 fi
 
-echo -e "  GenieACS built OK"
+echo -e "  GenieACS ready."
 
 # ---- Config ----
 echo -e "${YELLOW}  Creating config...${NC}"
