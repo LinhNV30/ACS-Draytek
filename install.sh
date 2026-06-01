@@ -175,8 +175,9 @@ fi
 echo -e "  GenieACS built OK"
 
 # ---- Config ----
+echo -e "${YELLOW}  Creating config...${NC}"
 mkdir -p dist/config/ext
-JWT_SECRET=$(openssl rand -hex 32)
+JWT_SECRET=$(openssl rand -hex 32 2>/dev/null || echo "genieacs-secret-$(date +%s)")
 cat > dist/config/config.json << EOF
 {
   "MONGODB_CONNECTION_URL": "mongodb://127.0.0.1/genieacs",
@@ -187,11 +188,16 @@ cat > dist/config/config.json << EOF
 EOF
 
 # ---- Seed + Assets ----
+echo -e "${YELLOW}  Copying seed & assets...${NC}"
 cp -r seed dist/ 2>/dev/null || true
-cd dist/public
-for f in app-*.css; do cp "$f" app.css 2>/dev/null; done
-for f in app-*.js; do cp "$f" app.js 2>/dev/null; done
-for f in icons-*.svg; do cp "$f" icons.svg 2>/dev/null; done
+if [ -d "dist/public" ]; then
+    cd dist/public
+    for f in app-*.css; do [ -f "$f" ] && cp "$f" app.css 2>/dev/null; done || true
+    for f in app-*.js; do [ -f "$f" ] && cp "$f" app.js 2>/dev/null; done || true
+    for f in icons-*.svg; do [ -f "$f" ] && cp "$f" icons.svg 2>/dev/null; done || true
+    cd "$INSTALL_DIR/genieacs"
+fi
+echo -e "  Config & assets ready."
 
 # ============================================================
 # STEP 3: Panel
