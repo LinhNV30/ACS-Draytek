@@ -298,12 +298,20 @@ echo -e "${GREEN}[4/7] Creating services...${NC}"
 NODE_BIN=$(which node)
 
 for svc in cwmp nbi fs ui; do
-    BIN_PATH="$INSTALL_DIR/genieacs/dist/bin/genieacs-${svc}"
-    if [ -f "$BIN_PATH" ]; then
-        chmod +x "$BIN_PATH"
-        echo -e "  Binary OK: genieacs-${svc}"
+    # Find the actual working binary
+    BIN_PATH=""
+    if [ -x "/usr/bin/genieacs-${svc}" ]; then
+        BIN_PATH="/usr/bin/genieacs-${svc}"
+    elif [ -x "/usr/local/bin/genieacs-${svc}" ]; then
+        BIN_PATH="/usr/local/bin/genieacs-${svc}"
+    elif [ -f "$INSTALL_DIR/genieacs/dist/bin/genieacs-${svc}" ]; then
+        BIN_PATH="${NODE_BIN} $INSTALL_DIR/genieacs/dist/bin/genieacs-${svc}"
+    fi
+    
+    if [ -n "$BIN_PATH" ]; then
+        echo -e "  Binary: $BIN_PATH"
     else
-        echo -e "  ${RED}WARNING: $BIN_PATH not found${NC}"
+        echo -e "  ${RED}NOT FOUND: genieacs-${svc}${NC}"
     fi
     
     cat > "/etc/systemd/system/genieacs-${svc}.service" << EOF2
@@ -315,7 +323,7 @@ Type=simple
 WorkingDirectory=$INSTALL_DIR/genieacs/dist
 Environment=GENIEACS_MONGODB_CONNECTION_URL=mongodb://127.0.0.1/genieacs
 $( [ "$svc" = "ui" ] && echo "Environment=GENIEACS_UI_JWT_SECRET=${JWT_SECRET}" )
-ExecStart=${NODE_BIN} ${BIN_PATH}
+ExecStart=${BIN_PATH}
 Restart=always
 RestartSec=5
 [Install]
