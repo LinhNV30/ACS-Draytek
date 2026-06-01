@@ -169,36 +169,29 @@ done
 
 if [ -n "$MISSING_BINS" ]; then
     echo -e "${RED}  Missing binaries:${MISSING_BINS}${NC}"
-    echo -e "${YELLOW}  Installing genieacs from npm instead...${NC}"
-    cd "$INSTALL_DIR"
-    rm -rf genieacs
-    mkdir -p genieacs/dist/bin genieacs/dist/config/ext genieacs/dist/public genieacs/dist/seed
-    npm install --prefix genieacs genieacs@latest 2>&1 | tail -3
+    echo -e "${YELLOW}  Installing genieacs from npm...${NC}"
     
-    # npm installs genieacs to node_modules, copy binaries
-    if [ -f "genieacs/node_modules/.bin/genieacs-cwmp" ]; then
-        cp genieacs/node_modules/.bin/genieacs-* genieacs/dist/bin/ 2>/dev/null || true
-        # Also check lib/node_modules
-    elif [ -d "genieacs/node_modules/genieacs/bin" ]; then
-        cp genieacs/node_modules/genieacs/bin/* genieacs/dist/bin/ 2>/dev/null || true
-    fi
+    # Install genieacs globally for proper binary setup
+    npm install -g genieacs@latest 2>&1 | tail -3
     
-    # If still missing, download prebuilt from GitHub releases
-    if [ ! -f "genieacs/dist/bin/genieacs-cwmp" ]; then
-        echo -e "${YELLOW}  Downloading prebuilt genieacs...${NC}"
-        npm install -g genieacs 2>&1 | tail -2
-        NPM_GLOBAL=$(npm root -g)
-        if [ -d "$NPM_GLOBAL/genieacs/bin" ]; then
-            cp "$NPM_GLOBAL/genieacs/bin/"* genieacs/dist/bin/ 2>/dev/null || true
-        fi
-        # Copy from global bin
+    # Copy global node_modules to dist for binary dependencies
+    NPM_GLOBAL=$(npm root -g)
+    cp -r "$NPM_GLOBAL" "$INSTALL_DIR/genieacs/dist/node_modules" 2>/dev/null || true
+    mkdir -p "$INSTALL_DIR/genieacs/dist/node_modules"
+    cd "$INSTALL_DIR/genieacs/dist/node_modules"
+    npm init -y --silent 2>/dev/null || true
+    npm install genieacs@latest --silent 2>&1 | tail -1
+    cd "$INSTALL_DIR/genieacs"
+    
+    # Copy binaries from node_modules
+    if [ -d "dist/node_modules/.bin" ]; then
         for b in cwmp nbi fs ui; do
-            if which genieacs-${b} 2>/dev/null; then
-                cp "$(which genieacs-${b})" "genieacs/dist/bin/genieacs-${b}" 2>/dev/null || true
-            fi
+            [ -f "dist/node_modules/.bin/genieacs-${b}" ] && cp "dist/node_modules/.bin/genieacs-${b}" "dist/bin/genieacs-${b}" 2>/dev/null
         done
     fi
-    cd "$INSTALL_DIR/genieacs"
+    if [ -d "dist/node_modules/genieacs/bin" ]; then
+        cp dist/node_modules/genieacs/bin/* dist/bin/ 2>/dev/null || true
+    fi
 fi
 
 # Final check
@@ -298,21 +291,7 @@ echo -e "${GREEN}[4/7] Creating services...${NC}"
 NODE_BIN=$(which node)
 
 for svc in cwmp nbi fs ui; do
-    # Find the actual working binary
-    BIN_PATH=""
-    if [ -x "/usr/bin/genieacs-${svc}" ]; then
-        BIN_PATH="/usr/bin/genieacs-${svc}"
-    elif [ -x "/usr/local/bin/genieacs-${svc}" ]; then
-        BIN_PATH="/usr/local/bin/genieacs-${svc}"
-    elif [ -f "$INSTALL_DIR/genieacs/dist/bin/genieacs-${svc}" ]; then
-        BIN_PATH="${NODE_BIN} $INSTALL_DIR/genieacs/dist/bin/genieacs-${svc}"
-    fi
-    
-    if [ -n "$BIN_PATH" ]; then
-        echo -e "  Binary: $BIN_PATH"
-    else
-        echo -e "  ${RED}NOT FOUND: genieacs-${svc}${NC}"
-    fi
+    BIN_PATH="${NODE_BIN} $INSTALL_DIR/genieacs/dist/bin/genieacs-${svc}"
     
     cat > "/etc/systemd/system/genieacs-${svc}.service" << EOF2
 [Unit]
@@ -321,6 +300,7 @@ After=network.target mongod.service
 [Service]
 Type=simple
 WorkingDirectory=$INSTALL_DIR/genieacs/dist
+Environment=NODE_PATH=$INSTALL_DIR/genieacs/dist/node_modules
 Environment=GENIEACS_MONGODB_CONNECTION_URL=mongodb://127.0.0.1/genieacs
 $( [ "$svc" = "ui" ] && echo "Environment=GENIEACS_UI_JWT_SECRET=${JWT_SECRET}" )
 ExecStart=${BIN_PATH}
@@ -329,6 +309,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF2
+    echo -e "  Service: genieacs-${svc}"
 done
 
 cat > /etc/systemd/system/genieacs-panel-api.service << EOF
