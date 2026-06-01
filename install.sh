@@ -7,7 +7,6 @@
 set -e
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
-GENIEACS_VER="1.3.0-dev"
 INSTALL_DIR="/opt"
 PANEL_REPO="https://github.com/LinhNV30/ACS-Draytek.git"
 GENIEACS_REPO="https://github.com/genieacs/genieacs.git"
@@ -18,41 +17,40 @@ echo -e "${GREEN}  Ubuntu 24.04.4 LTS${NC}"
 echo -e "${GREEN}============================================${NC}"
 echo ""
 
-# ---- Check root ----
 if [ "$EUID" -ne 0 ]; then
     echo -e "${RED}Please run as root: sudo bash $0${NC}"
     exit 1
 fi
 
-# ---- Detect IP ----
 SERVER_IP=$(hostname -I | awk '{print $1}')
 echo -e "${YELLOW}Detected IP: ${SERVER_IP}${NC}"
-read -p "Use this IP for ACS URL? [Y/n]: " USE_IP
+read -p "Use this IP? [Y/n]: " USE_IP
 USE_IP=${USE_IP:-Y}
 if [[ "$USE_IP" =~ ^[Nn] ]]; then
-    read -p "Enter ACS server IP or domain: " SERVER_IP
+    read -p "Enter server IP/domain: " SERVER_IP
 fi
 echo ""
 
 # ============================================================
-# STEP 1: Install prerequisites
+# STEP 1: Prerequisites
 # ============================================================
 echo -e "${GREEN}[1/7] Installing prerequisites...${NC}"
 apt-get update -qq
-apt-get install -y -qq curl git build-essential gnupg ufw net-tools unzip 2>&1 | tail -1
+apt-get install -y -qq curl git build-essential gnupg ufw net-tools unzip openssl python3 2>/dev/null
 
-# ---- Node.js 20.x ----
-if ! command -v node &>/dev/null; then
+# ---- Node.js 20.x (REQUIRED) ----
+NODE_MAJOR=$(node -v 2>/dev/null | cut -d. -f1 | tr -d 'v')
+if [ "$NODE_MAJOR" != "20" ] 2>/dev/null || ! command -v node &>/dev/null; then
     echo -e "${YELLOW}  Installing Node.js 20.x...${NC}"
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - &>/dev/null
     apt-get install -y -qq nodejs
 fi
 echo -e "  Node.js: $(node -v) | npm: $(npm -v)"
 
-# ---- MongoDB 7.0 ----
+# ---- MongoDB ----
 if ! command -v mongod &>/dev/null; then
-    echo -e "${YELLOW}  Installing MongoDB 7.0...${NC}"
-    curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg
+    echo -e "${YELLOW}  Installing MongoDB...${NC}"
+    curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg 2>/dev/null
     echo "deb [signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" > /etc/apt/sources.list.d/mongodb-org-7.0.list
     apt-get update -qq
     apt-get install -y -qq mongodb-org
@@ -62,290 +60,233 @@ fi
 echo -e "  MongoDB: $(mongod --version 2>/dev/null | head -1)"
 
 # ============================================================
-# STEP 2: Clone & Build GenieACS
+# STEP 2: Build GenieACS
 # ============================================================
-echo -e "${GREEN}[2/7] Installing GenieACS...${NC}"
+echo -e "${GREEN}[2/7] Building GenieACS...${NC}"
 
 if [ ! -d "$INSTALL_DIR/genieacs" ]; then
     git clone "$GENIEACS_REPO" "$INSTALL_DIR/genieacs" 2>&1 | tail -1
 fi
 cd "$INSTALL_DIR/genieacs"
 
-# Fix build issues for newer Node.js
-echo -e "${YELLOW}  Applying compatibility fixes...${NC}"
+echo -e "${YELLOW}  Patching for Node.js $(node -v)...${NC}"
 
-# Fix import assertions (with -> assert)
-if grep -q "with { type: \"text\" }" lib/init.ts 2>/dev/null; then
-    sed -i 's/with { type: "text" }/assert { type: "text" }/g' lib/init.ts
-fi
+# --- Patch 1: Replace import assertions with fs.readFileSync in init.ts ---
+python3 -c "
+import re
+with open('lib/init.ts', 'r') as f:
+    content = f.read()
 
-# Fix seedPlugin for assert support
-sed -i 's/if (args.with?\.\["type"\] !== "text") return undefined/if (args.with?.["type"] !== "text" \&\& args.assert?.["type"] !== "text") return undefined/' build/build.ts 2>/dev/null || true
+imports = re.findall(r'import (\w+) from \"\.\./seed/([\w.-]+)\" (?:with|assert) \{ type: \"text\" \};', content)
+if imports:
+    for var, file in imports:
+        content = content.replace(f'import {var} from \"../seed/{file}\" with {{ type: \"text\" }};', '')
+        content = content.replace(f'import {var} from \"../seed/{file}\" assert {{ type: \"text\" }};', '')
+    
+    first_import = content.find('import ')
+    last_import = max(m.end() for m in re.finditer(r'^import .+$', content, re.MULTILINE))
+    
+    fs_import = 'import * as fs from \"node:fs\";\nimport * as path from \"node:path\";\n'
+    seed_lines = ['const SEED_DIR = path.resolve(__dirname, \"..\", \"seed\");']
+    for var, file in imports:
+        seed_lines.append(f'const {var} = fs.readFileSync(path.join(SEED_DIR, \"{file}\"), \"utf8\");')
+    
+    content = content[:first_import] + fs_import + content[first_import:last_import] + '\n' + '\n'.join(seed_lines) + '\n' + content[last_import:]
+    with open('lib/init.ts', 'w') as f:
+        f.write(content)
+    print('init.ts patched')
+" 2>/dev/null && echo -e "    init.ts patched" || echo -e "    init.ts skip"
 
-# Fix build targets for Node 20
+# --- Patch 2: Targets ---
 sed -i 's/target: "node12"/target: "node18"/g' build/build.ts 2>/dev/null || true
 sed -i 's/target: "node12.13.0"/target: "node18"/g' build/build.ts 2>/dev/null || true
 sed -i 's/--target=node12/--target=node18/g' package.json 2>/dev/null || true
 
-# Fix Tailwind CSS v4 compatibility
-sed -i 's|entryPoints: \["ui/css/app.css"\]|entryPoints: ["ui/css/app-compiled.css"]|' build/build.ts 2>/dev/null || true
+# --- Patch 3: seedPlugin for both with/assert ---
+sed -i 's/if (args.with?\.\["type"\] !== "text") return undefined;/if ((args.with?.["type"] || args.assert?.["type"]) !== "text") return undefined;/' build/build.ts 2>/dev/null || true
 
-# Fix EBUSY error (dist locked)
-sed -i 's/await fsAsync.rmdir(dirPath);/try { await fsAsync.rmdir(dirPath); } catch(err) { if(err.code !== "EBUSY" \&\& err.code !== "ENOTEMPTY") throw err; }/' build/build.ts 2>/dev/null || true
-sed -i 's/await fsAsync.mkdir(OUTPUT_DIR);/await fsAsync.mkdir(OUTPUT_DIR).catch((err) => { if (err.code !== "EEXIST") throw err; });/' build/build.ts 2>/dev/null || true
+# --- Patch 4: rmdir/mkdir tolerant ---
+sed -i 's|await fsAsync.rmdir(dirPath);|try { await fsAsync.rmdir(dirPath); } catch(err) { if(err.code !== "EBUSY" \&\& err.code !== "ENOTEMPTY") throw err; }|' build/build.ts 2>/dev/null || true
+sed -i 's|await fsAsync.mkdir(OUTPUT_DIR);|await fsAsync.mkdir(OUTPUT_DIR).catch((err) => { if (err.code !== "EEXIST") throw err; });|' build/build.ts 2>/dev/null || true
 
-# Build
-npm install --silent 2>&1 | tail -1
-npm run build 2>&1 | tail -3
+# --- Patch 5: Pre-compile Tailwind CSS ---
+python3 -c "
+import re
+with open('build/build.ts', 'r') as f:
+    content = f.read()
 
-# ---- Create GenieACS config ----
-mkdir -p "$INSTALL_DIR/genieacs/dist/config/ext"
-cat > "$INSTALL_DIR/genieacs/dist/config/config.json" << EOF
+old_func = '''async function generateCss'''
+new_func = '''async function generateCss(): Promise<void> {
+  const appCssPath = path.join(INPUT_DIR, \"ui/css/app.css\");
+  const { stdout } = await execAsync(\`npx @tailwindcss/cli -i \${appCssPath}\`);
+  const compiledCssPath = path.join(INPUT_DIR, \"ui/css/app-compiled.css\");
+  await fsAsync.writeFile(compiledCssPath, stdout);
+'''
+if old_func in content:
+    # Replace the function body approach
+    content = content.replace('entryPoints: [\"ui/css/app.css\"]', 'entryPoints: [\"ui/css/app-compiled.css\"]')
+    content = content.replace('if (v.entryPoint === \"ui/css/app.css\")', 'if (v.entryPoint === \"ui/css/app-compiled.css\")')
+    
+    # Remove the tailwindPlugin (onLoad hook)
+    content = re.sub(
+        r'const tailwindPlugin = \{.*?\} as esbuild\.Plugin;\s*',
+        '',
+        content,
+        flags=re.DOTALL
+    )
+    content = content.replace('plugins: [tailwindPlugin],', '')
+    print('CSS build patched')
+    with open('build/build.ts', 'w') as f:
+        f.write(content)
+" 2>/dev/null && echo -e "    CSS build patched" || echo -e "    CSS patch skip"
+
+echo -e "${YELLOW}  npm install...${NC}"
+npm install 2>&1 | tail -3
+
+echo -e "${YELLOW}  npm build...${NC}"
+npm run build 2>&1 | tail -5
+
+if [ ! -d "dist/bin" ]; then
+    echo -e "${RED}  BUILD FAILED - dist/bin not found${NC}"
+    echo -e "${YELLOW}  Trying fallback build...${NC}"
+    rm -rf dist node_modules
+    npm install 2>&1 | tail -3
+    npm run build 2>&1 | tail -5
+fi
+
+if [ ! -d "dist/bin" ]; then
+    echo -e "${RED}FATAL: GenieACS build failed${NC}"
+    exit 1
+fi
+
+echo -e "  GenieACS built OK"
+
+# ---- Config ----
+mkdir -p dist/config/ext
+JWT_SECRET=$(openssl rand -hex 32)
+cat > dist/config/config.json << EOF
 {
   "MONGODB_CONNECTION_URL": "mongodb://127.0.0.1/genieacs",
-  "CWMP_PORT": 7547,
-  "NBI_PORT": 7557,
-  "FS_PORT": 7567,
-  "UI_PORT": 3000,
-  "UI_JWT_SECRET": "$(openssl rand -hex 32)"
+  "CWMP_PORT": 7547, "NBI_PORT": 7557,
+  "FS_PORT": 7567, "UI_PORT": 3000,
+  "UI_JWT_SECRET": "${JWT_SECRET}"
 }
 EOF
 
-echo -e "  GenieACS: installed at $INSTALL_DIR/genieacs"
+# ---- Seed + Assets ----
+cp -r seed dist/ 2>/dev/null || true
+cd dist/public
+for f in app-*.css; do cp "$f" app.css 2>/dev/null; done
+for f in app-*.js; do cp "$f" app.js 2>/dev/null; done
+for f in icons-*.svg; do cp "$f" icons.svg 2>/dev/null; done
 
 # ============================================================
-# STEP 3: Clone & Setup GenieACS Panel
+# STEP 3: Panel
 # ============================================================
-echo -e "${GREEN}[3/7] Installing GenieACS Panel...${NC}"
-
+echo -e "${GREEN}[3/7] Installing Panel...${NC}"
 if [ ! -d "$INSTALL_DIR/genieacs-panel" ]; then
     git clone "$PANEL_REPO" "$INSTALL_DIR/genieacs-panel" 2>&1 | tail -1
 fi
 
-# ---- Backend ----
 cd "$INSTALL_DIR/genieacs-panel/backend"
-npm install --silent 2>&1 | tail -1
-
-# Create .env
-JWT_SECRET=$(openssl rand -hex 32)
+npm install 2>&1 | tail -1
 cat > .env << EOF
-# Database (SQLite)
 SQLITE_PATH=../database.sqlite
-
-# App
 APP_PORT=3001
 APP_ENV=production
-
-# Security
 SECRET_KEY=$(openssl rand -hex 32)
 JWT_SECRET=${JWT_SECRET}
 JWT_EXPIRES_IN=24h
 REFRESH_TOKEN_EXPIRES_IN=7d
-
-# GenieACS NBI API
 GENIEACS_URL=http://127.0.0.1:7557
 EOF
 
-# ---- Frontend ----
 cd "$INSTALL_DIR/genieacs-panel/frontend"
-npm install --silent 2>&1 | tail -1
-
-# Create .env.local
+npm install 2>&1 | tail -1
 cat > .env.local << EOF
 NEXT_PUBLIC_API_URL=http://${SERVER_IP}:3001
 EOF
 
-echo -e "  Panel: installed at $INSTALL_DIR/genieacs-panel"
+cd "$INSTALL_DIR/genieacs-panel"
+node -e "
+const D=require('./backend/node_modules/better-sqlite3');
+const b=require('./backend/node_modules/bcryptjs');
+const db=new D('./database.sqlite');
+db.prepare('INSERT OR REPLACE INTO users(id,username,password,role) VALUES(1,?,?,?)').run('admin',b.hashSync('admin123',12),'admin');
+db.close();
+" 2>/dev/null
 
 # ============================================================
-# STEP 4: Create systemd services
+# STEP 4: systemd
 # ============================================================
-echo -e "${GREEN}[4/7] Creating systemd services...${NC}"
+echo -e "${GREEN}[4/7] Creating services...${NC}"
 
-# ---- GenieACS CWMP ----
-cat > /etc/systemd/system/genieacs-cwmp.service << EOF
+for svc in cwmp nbi fs ui; do
+    cat > "/etc/systemd/system/genieacs-${svc}.service" << EOF2
 [Unit]
-Description=GenieACS CWMP (TR-069 ACS)
+Description=GenieACS ${svc^^}
 After=network.target mongod.service
-
 [Service]
 Type=simple
-User=root
 WorkingDirectory=$INSTALL_DIR/genieacs/dist
 Environment=GENIEACS_MONGODB_CONNECTION_URL=mongodb://127.0.0.1/genieacs
-ExecStart=/usr/bin/node $INSTALL_DIR/genieacs/dist/bin/genieacs-cwmp
+$( [ "$svc" = "ui" ] && echo "Environment=GENIEACS_UI_JWT_SECRET=${JWT_SECRET}" )
+ExecStart=/usr/bin/node $INSTALL_DIR/genieacs/dist/bin/genieacs-${svc}
 Restart=always
 RestartSec=5
-
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF2
+done
 
-# ---- GenieACS NBI ----
-cat > /etc/systemd/system/genieacs-nbi.service << EOF
-[Unit]
-Description=GenieACS NBI (REST API)
-After=network.target mongod.service
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=$INSTALL_DIR/genieacs/dist
-Environment=GENIEACS_MONGODB_CONNECTION_URL=mongodb://127.0.0.1/genieacs
-ExecStart=/usr/bin/node $INSTALL_DIR/genieacs/dist/bin/genieacs-nbi
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# ---- GenieACS FS ----
-cat > /etc/systemd/system/genieacs-fs.service << EOF
-[Unit]
-Description=GenieACS FS (File Server)
-After=network.target mongod.service
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=$INSTALL_DIR/genieacs/dist
-Environment=GENIEACS_MONGODB_CONNECTION_URL=mongodb://127.0.0.1/genieacs
-ExecStart=/usr/bin/node $INSTALL_DIR/genieacs/dist/bin/genieacs-fs
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# ---- GenieACS UI ----
-cat > /etc/systemd/system/genieacs-ui.service << EOF
-[Unit]
-Description=GenieACS UI (Web Interface)
-After=network.target mongod.service
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=$INSTALL_DIR/genieacs/dist
-Environment=GENIEACS_MONGODB_CONNECTION_URL=mongodb://127.0.0.1/genieacs
-Environment=GENIEACS_UI_JWT_SECRET=${JWT_SECRET}
-ExecStart=/usr/bin/node $INSTALL_DIR/genieacs/dist/bin/genieacs-ui
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# ---- Panel Backend ----
 cat > /etc/systemd/system/genieacs-panel-api.service << EOF
 [Unit]
-Description=GenieACS Panel Backend API
+Description=GenieACS Panel API
 After=network.target
-
 [Service]
 Type=simple
-User=root
 WorkingDirectory=$INSTALL_DIR/genieacs-panel/backend
 ExecStart=/usr/bin/node $INSTALL_DIR/genieacs-panel/backend/src/server.js
 Restart=always
 RestartSec=5
-
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# ---- Panel Frontend ----
 cat > /etc/systemd/system/genieacs-panel-frontend.service << EOF
 [Unit]
-Description=GenieACS Panel Frontend (Next.js)
+Description=GenieACS Panel Frontend
 After=network.target
-
 [Service]
 Type=simple
-User=root
 WorkingDirectory=$INSTALL_DIR/genieacs-panel/frontend
 ExecStart=/usr/bin/npm run dev
 Restart=always
 RestartSec=5
-
 [Install]
 WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-echo -e "  Services created."
 
 # ============================================================
-# STEP 5: Copy hashed assets & seed DB
+# STEP 5: Firewall
 # ============================================================
-echo -e "${GREEN}[5/7] Setting up assets & database...${NC}"
-
-# Copy hashed assets
-cd "$INSTALL_DIR/genieacs/dist/public"
-for f in app-*.css; do cp "$f" app.css 2>/dev/null; done
-for f in app-*.js; do cp "$f" app.js 2>/dev/null; done
-for f in icons-*.svg; do cp "$f" icons.svg 2>/dev/null; done
-
-# Copy seed to dist
-cp -r "$INSTALL_DIR/genieacs/seed"/* "$INSTALL_DIR/genieacs/dist/seed/" 2>/dev/null || true
-
-# Reset default admin password for panel
-cd "$INSTALL_DIR/genieacs-panel"
-node -e "
-const Database = require('./backend/node_modules/better-sqlite3');
-const bcrypt = require('./backend/node_modules/bcryptjs');
-const db = new Database('./database.sqlite');
-const hash = bcrypt.hashSync('admin123', 12);
-db.prepare('INSERT OR REPLACE INTO users (id, username, password, role) VALUES (1, ?, ?, ?)').run('admin', hash, 'admin');
-console.log('Panel admin user: admin / admin123');
-db.close();
-" 2>/dev/null || echo -e "${YELLOW}  Panel DB already configured.${NC}"
-
-echo -e "  Assets & database ready."
+echo -e "${GREEN}[5/7] Firewall...${NC}"
+ufw --force enable 2>/dev/null || true
+for port in 22 7547 7557 7567 3000 3001 3002; do
+    ufw allow $port/tcp 2>/dev/null || true
+done
 
 # ============================================================
-# STEP 6: Configure Firewall
+# STEP 6: Start
 # ============================================================
-echo -e "${GREEN}[6/7] Configuring firewall...${NC}"
-
-ufw --force enable 2>/dev/null
-ufw allow 22/tcp comment "SSH"
-ufw allow 7547/tcp comment "GenieACS CWMP (TR-069)"
-ufw allow 7557/tcp comment "GenieACS NBI (API)"
-ufw allow 7567/tcp comment "GenieACS FS (Files)"
-ufw allow 3000/tcp comment "GenieACS UI"
-ufw allow 3001/tcp comment "Panel Backend API"
-ufw allow 3002/tcp comment "Panel Frontend"
-ufw reload 2>/dev/null
-
-echo -e "  Firewall configured."
-
-# ============================================================
-# STEP 7: Start all services
-# ============================================================
-echo -e "${GREEN}[7/7] Starting services...${NC}"
-
-SERVICES=(
-    genieacs-cwmp
-    genieacs-nbi
-    genieacs-fs
-    genieacs-ui
-    genieacs-panel-api
-    genieacs-panel-frontend
-)
-
-for svc in "${SERVICES[@]}"; do
-    systemctl enable "$svc" 2>/dev/null
-    systemctl restart "$svc" 2>/dev/null
+echo -e "${GREEN}[6/7] Starting services...${NC}"
+for svc in genieacs-cwmp genieacs-nbi genieacs-fs genieacs-ui genieacs-panel-api genieacs-panel-frontend; do
+    systemctl enable "$svc" 2>/dev/null || true
+    systemctl restart "$svc" 2>/dev/null || true
     sleep 1
-    if systemctl is-active --quiet "$svc"; then
-        echo -e "  ${GREEN}✓${NC} $svc"
-    else
-        echo -e "  ${RED}✗${NC} $svc (check: journalctl -u $svc)"
-    fi
+    systemctl is-active --quiet "$svc" 2>/dev/null && echo -e "  ${GREEN}OK${NC} $svc" || echo -e "  ${RED}FAIL${NC} $svc"
 done
 
 # ============================================================
@@ -353,20 +294,9 @@ done
 # ============================================================
 echo ""
 echo -e "${GREEN}============================================${NC}"
-echo -e "${GREEN}  ACS-Draytek Installation Complete!${NC}"
+echo -e "${GREEN}  Done!${NC}"
 echo -e "${GREEN}============================================${NC}"
 echo ""
-echo -e "  Server IP:     ${YELLOW}${SERVER_IP}${NC}"
-echo -e "  TR-069 ACS:    ${YELLOW}http://${SERVER_IP}:7547/${NC}"
-echo ""
-echo -e "  GenieACS UI:   ${YELLOW}http://${SERVER_IP}:3000${NC}"
-echo -e "    Login: admin / admin"
-echo ""
-echo -e "  Panel UI:      ${YELLOW}http://${SERVER_IP}:3002${NC}"
-echo -e "    Login: admin / admin123"
-echo ""
-echo -e "  Panel API:     ${YELLOW}http://${SERVER_IP}:3001${NC}"
-echo -e "  NBI API:       ${YELLOW}http://${SERVER_IP}:7557${NC}"
-echo ""
-echo -e "${YELLOW}  Logs: journalctl -u genieacs-* -f${NC}"
-echo -e "${GREEN}============================================${NC}"
+echo -e "  ACS URL:   ${YELLOW}http://${SERVER_IP}:7547/${NC}"
+echo -e "  UI:        ${YELLOW}http://${SERVER_IP}:3000${NC}  (admin/admin)"
+echo -e "  Panel:     ${YELLOW}http://${SERVER_IP}:3002${NC}  (admin/admin123)"
